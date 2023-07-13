@@ -1,5 +1,5 @@
 import data
-import train
+import train_cr as train
 import pickle
 
 
@@ -7,6 +7,8 @@ import os
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 os.environ["CUDA_VISIBLE_DEVICES"] = '0'
 import tensorflow as tf
+#gpu = tf.config.list_physical_devices('GPU')
+#tf.config.experimental.set_memory_growth(device=gpu[0], enable=True)
 import numpy as np
 import pandas as pd
 
@@ -27,7 +29,7 @@ for n_inducing in n_inducings:
     for val_name in val_names:
 
         # Save_path
-        save_path = 'experiments/{}_{}/{}/'.format(train_name,val_name,n_inducing)
+        save_path = 'experiments/{}_{}/{}/'.format(train_names[0],val_name,n_inducing)
         if not os.path.exists(save_path):
             os.makedirs(save_path)
         # Load and select data
@@ -37,7 +39,7 @@ for n_inducing in n_inducings:
         # Train dataset
         X_tr = tf.convert_to_tensor(data_loaded.X_train,dtype=FLOAT_TYPE)
         y_tr = tf.convert_to_tensor(data_loaded.y_train,dtype=FLOAT_TYPE)
-        Y_mask = tf.convert_to_tensor(data_loaded.Y_mask) #TODO: reconvertir datos e implementar la mask
+        Y_mask = tf.convert_to_tensor(data_loaded.grx.train_mask) #TODO: reconvertir datos e implementar la mask
 
         # Validation dataset
         X_vl = tf.convert_to_tensor(data_loaded.X_val,dtype=FLOAT_TYPE)

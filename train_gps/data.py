@@ -10,6 +10,21 @@ def unpack_data_grx_train(data):
 def unpack_data_grx_test(data):
     return data['features'], np.array(data['label_list']), data['names'], data['MV'], data['EM'], data['GT']
 
+def process_labels_cr(labels):
+    labels_cr = np.zeros((labels.shape[0], labels.shape[1], 2))
+    labels_mask = np.zeros((labels.shape[0], labels.shape[1]))
+    for ix, x in enumerate(labels):
+        for iy, y in enumerate(x):
+            if y != -1:
+                labels_cr[ix, iy, 0] = iy   
+                labels_cr[ix, iy, 1] = y
+                labels_mask[ix, iy] = 1
+            else:
+                labels_cr[ix, iy, 0] = -1   
+                labels_cr[ix, iy, 1] = -1
+                labels_mask[ix, iy] = 0
+    return labels_cr, labels_mask
+
 class load_data:
     def __init__(self):
         print("Load data")
@@ -25,9 +40,8 @@ class load_data:
             self.X_train = self.grx.X_train
             self.y_train = self.grx.train_MV
         elif train == 'grxcr':
-            raise NotImplementedError
             self.X_train = self.grx.X_train
-            self.y_train = self.grx.train_EM
+            self.y_train = self.grx.y_train
         elif train == 'vlc':
             self.X_train = self.sicap.X_train
             self.y_train = self.sicap.y_train
@@ -99,6 +113,8 @@ class grx_data:
         train = grx_data['train']
         self.X_train, self.y_train, self.train_names, \
             self.train_MV, self.train_EM  = unpack_data_grx_train(train)
+        
+        self.y_train, self.train_mask = process_labels_cr(self.y_train)
 
         # validation
         val = grx_data['val']

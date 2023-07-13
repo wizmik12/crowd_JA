@@ -12,9 +12,10 @@ import gpflow
 from scipy.cluster.vq import kmeans2
 from sklearn.metrics import f1_score, roc_auc_score, cohen_kappa_score, accuracy_score, classification_report
 from typing import Tuple
-import main
+import data
 
 figure_of_merit = 'kap2'
+float_type = tf.float64
 
 def create_setup(X, lengthscale, variance, lr, num_inducing, K):
     model = gpflow.models.SVGP(kernel=gpflow.kernels.SquaredExponential(lengthscales=lengthscale, variance=variance),
@@ -38,10 +39,7 @@ def _init_behaviors(probs, Y_cr, Y_mask, A, K):
     return alpha_tilde/np.sum(alpha_tilde,axis=1,keepdims=True)
 
 ##### Initializations of q_raw and alpha_tilde_raw and alpha (they are _raw because these values must be constrained)
-def crowd_setup(Y_cr, Y_mask, A, K):
-    counts_init = np.array([np.bincount(y[m==1,1], minlength=K) for y,m in zip(Y_cr,Y_mask)])
-    counts_init = counts_init + np.ones(counts_init.shape)
-    q_raw_init = np.log(counts_init/np.sum(counts_init,axis=1,keepdims=True))
+def crowd_setup(Y_cr, Y_mask, q_raw_init, A, K):
 
     alpha_tilde_raw_init = _init_behaviors(q_raw_init, Y_cr, Y_mask, A, K)
     alpha = tf.ones((A,K,K),dtype=float_type)
@@ -51,12 +49,33 @@ def crowd_setup(Y_cr, Y_mask, A, K):
 
     return alpha_tilde_raw, q_raw
 
-alpha_tilde_raw, q_raw = crowd_setup(main.Y_cr, main.Y_mask, A=7, K=4)
-######################################################################################################################################
+A = 7
+K = 4
+data_loaded_aux = data.load_data()
+data_loaded_aux.select('grxcr', 'grxmv')
+Y_cr = data_loaded_aux.y_train
+Y_cr = Y_cr.astype('int64')
+Y_mask = data_loaded_aux.grx.train_mask
 
-@tf.function
-def crowd_optimization_step(model,Y_cr_mb,Y_mask_mb,idxs_mb, trainable_variables):
-    scale = N/tf.cast(X_tr_nor_mb.shape[0],float_type) # scale to take into account the minibatch size
+
+alpha = tf.ones((A,K,K),dtype=float_type)
+
+counts_init = np.array([np.bincount(y[m==1,1], minlength=K) for y,m in zip(Y_cr,Y_mask)])
+counts_init = counts_init + np.ones(counts_init.shape)
+q_raw_init = np.log(counts_init/np.sum(counts_init,axis=1,keepdims=True))
+
+alpha_tilde_raw, q_raw = crowd_setup(Y_cr, Y_mask, q_raw_init, A=7, K=4)
+model = gpflow.models.SVGP(kernel=gpflow.kernels.SquaredExponential(lengthscales=2.0, variance=2.0),
+                            likelihood=gpflow.likelihoods.MultiClass(K),
+                            inducing_variable=kmeans2(data_loaded_aux.X_train,100,minit='points')[0],
+                            num_latent_gps=K,
+                            num_data=len(data_loaded_aux.X_train))
+optimizer = tf.optimizers.Adam(learning_rate=1e-2)
+trainable_variables = (alpha_tilde_raw, q_raw) + model.trainable_variables
+
+######################################################################################################################################
+def crowd_optimization_step(X_tr, Y_cr_mb,Y_mask_mb,idxs_mb,  N):
+    scale = N/tf.cast(X_tr.shape[0],float_type) # scale to take into account the minibatch size
     with tf.GradientTape() as tape:   # tf.GradientTape() records the gradients. All the computations for which gradients are required must go in such a block
         q_mb = tf.nn.softmax(tf.gather(q_raw,idxs_mb)) # N_mb,K (constraint: positive and adds to 1 by rows). Gather selects the minibatch
         alpha_tilde = tf.exp(alpha_tilde_raw)  # A,K,K  (cosntraint: positive)
@@ -65,10 +84,10 @@ def crowd_optimization_step(model,Y_cr_mb,Y_mask_mb,idxs_mb, trainable_variables
         tnsr_expCrow = tf.gather_nd(expect_log,Y_cr_mb)*tf.cast(Y_mask_mb[:,:,None],float_type) # (N_mb,S,K) = (N_mb,S,K)*(N_mb,S,1)
         annot_term = tf.reduce_sum(tnsr_expCrow*q_mb[:,None,:])*scale # scalar
         # SVGP likelihood term (terms 2 in eq.15 TPAMI)
-        f_mean, f_var = model.predict_f(X_tr_nor_mb, full_cov=False, full_output_cov=False) # N,K ; N,K
-        liks = [model.likelihood.variational_expectations(f_mean,f_var,
-                                                            c*tf.ones((f_mean.shape[0],1),dtype=tf.int32))
-                 for c in np.arange(K)] # [(N_mb),....,(N_mb)]
+        f_mean, f_var = model.predict_f(X_tr, full_cov=False, full_output_cov=False) # N,K ; N,K
+        print("AAAAAAAAAAAAAAAAAAAAAA")
+        liks = [model.likelihood.variational_expectations(X_tr, f_mean,f_var, c*tf.ones((f_mean.shape[0],1),dtype=tf.int32)) for c in tf.range(K)] # [(N_mb),....,(N_mb)]
+        print("BBBBBBBBBBBBBB")
         lik_term = scale*tf.reduce_sum(q_mb*tf.stack(liks,axis=1))  # 1 <- reduce_sum[(N_mb,K)*(N_mb,K)]
         # Entropy term (term 3 in eq.15 TPAMI)
         entropy_term = -tf.reduce_sum(q_mb*tf.math.log(q_mb))*scale  #scalar
@@ -79,12 +98,19 @@ def crowd_optimization_step(model,Y_cr_mb,Y_mask_mb,idxs_mb, trainable_variables
         KL_annot_term=(tf.reduce_sum(alpha_diff*tf.math.digamma(alpha_tilde))-
                   tf.reduce_sum(tf.math.digamma(tf.reduce_sum(alpha_tilde,1))*tf.reduce_sum(alpha_diff,1))+
                   tf.reduce_sum(tf.math.lbeta(tf.linalg.matrix_transpose(alpha))-tf.math.lbeta(tf.linalg.matrix_transpose(alpha_tilde))))
+
         negELBO = -(annot_term + lik_term + entropy_term - KL_svgp_term - KL_annot_term)
+    
+    print("CCC", annot_term.numpy(), lik_term, entropy_term, KL_svgp_term)
+    print(negELBO)
+    print(trainable_variables)
     grads = tape.gradient(negELBO,trainable_variables)          # The gradients are obtained
     optimizer.apply_gradients(zip(grads,trainable_variables))   # The gradients are applied with the optimizer
     return -negELBO
 
-def run_adam_cr(model, optimizer, n_epochs, batch_size, X_tr=None, y_tr=None, Y_mask=None, X_vl=None, y_vl=None, save_path=None):
+
+
+def run_adam_cr(aa, optimizer, n_epochs, batch_size, X_tr=None, y_tr=None, Y_mask=None, X_vl=None, y_vl=None, save_path=None):
     """
     Utility function running the Adam optimizer
 
@@ -92,8 +118,6 @@ def run_adam_cr(model, optimizer, n_epochs, batch_size, X_tr=None, y_tr=None, Y_
     :param interations: number of iterations
     """
     N = len(X_tr)
-    trainable_variables = (alpha_tilde_raw,q_raw)+model.trainable_variable
-
     for epoch in range(n_epochs):
         print('    Epoch: {:2d} / {}'.format(epoch+1, n_epochs))
         idxs = np.random.permutation(N)
@@ -101,9 +125,9 @@ def run_adam_cr(model, optimizer, n_epochs, batch_size, X_tr=None, y_tr=None, Y_
 
         for _, idxs_mb in enumerate(idxs_iter):
             X_tr_mb = tf.gather(X_tr, idxs_mb)     # N_mb,D
-            t_tr_mb = tf.cast(tf.gather(y_tr, idxs_mb),tf.int32)            # N_mb,S,2
+            y_tr_mb = tf.cast(tf.gather(y_tr, idxs_mb),tf.int32)            # N_mb,S,2
             Y_mask_mb = tf.gather(Y_mask, idxs_mb)       # N_mb,S
-            ELBO = crowd_optimization_step(X_tr_nor_mb, Y_cr_mb, Y_mask_mb, idxs_mb, trainable_variables)
+            ELBO = crowd_optimization_step(X_tr_mb, y_tr_mb, Y_mask_mb, idxs_mb, N)
             if _ % 20 == 0:
                 train_step_metrics = evaluate(model, X_tr, y_tr)
                 val_step_metrics = evaluate(model, X_vl, y_vl)
@@ -135,6 +159,8 @@ def run_adam_cr(model, optimizer, n_epochs, batch_size, X_tr=None, y_tr=None, Y_
                 pickle.dump(logs, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
     return model, (figure_of_merit, best_val_metric)
+
+
 
 
 ####### Functions to predict and evaluate

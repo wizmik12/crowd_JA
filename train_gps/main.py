@@ -45,6 +45,7 @@ for n_inducing in n_inducings:
             y_tr = tf.convert_to_tensor(data_loaded.y_train,dtype=FLOAT_TYPE)
             dataset = (X_tr, y_tr) # caracteristicas y etiquetas
 
+            train_dataset = tf.data.Dataset.from_tensor_slices(dataset).repeat().shuffle(len(X_tr))
             train_iter = iter(train_dataset.batch(128))
 
             # Validation dataset
